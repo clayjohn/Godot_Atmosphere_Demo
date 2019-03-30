@@ -1,0 +1,481 @@
+[gd_scene load_steps=12 format=2]
+
+[ext_resource path="res://Planet.gd" type="Script" id=1]
+
+[sub_resource type="Shader" id=1]
+code = "shader_type canvas_item;
+
+uniform vec2 resolution = vec2(1024, 512);
+uniform float seed;
+uniform vec3 wavelength;
+uniform vec4 ground;
+
+vec3 hash( vec3 p )
+{
+	p = vec3( dot(p,vec3(127.1,311.7, 74.7)),
+			  dot(p,vec3(269.5,183.3,246.1)),
+			  dot(p,vec3(113.5,271.9,124.6)));
+
+	return -1.0 + 2.0*fract(seed + sin(p)*43758.5453123);
+}
+
+// return value noise (in x) and its derivatives (in yzw)
+vec4 noised( in vec3 x )
+{
+    // grid
+    vec3 p = floor(x);
+    vec3 w = fract(x);
+    
+    // quintic interpolant
+    vec3 u = w*w*w*(w*(w*6.0-15.0)+10.0);
+    vec3 du = 30.0*w*w*(w*(w-2.0)+1.0);
+    
+    // gradients
+    vec3 ga = hash( p+vec3(0.0,0.0,0.0) );
+    vec3 gb = hash( p+vec3(1.0,0.0,0.0) );
+    vec3 gc = hash( p+vec3(0.0,1.0,0.0) );
+    vec3 gd = hash( p+vec3(1.0,1.0,0.0) );
+    vec3 ge = hash( p+vec3(0.0,0.0,1.0) );
+	vec3 gf = hash( p+vec3(1.0,0.0,1.0) );
+    vec3 gg = hash( p+vec3(0.0,1.0,1.0) );
+    vec3 gh = hash( p+vec3(1.0,1.0,1.0) );
+    
+    // projections
+    float va = dot( ga, w-vec3(0.0,0.0,0.0) );
+    float vb = dot( gb, w-vec3(1.0,0.0,0.0) );
+    float vc = dot( gc, w-vec3(0.0,1.0,0.0) );
+    float vd = dot( gd, w-vec3(1.0,1.0,0.0) );
+    float ve = dot( ge, w-vec3(0.0,0.0,1.0) );
+    float vf = dot( gf, w-vec3(1.0,0.0,1.0) );
+    float vg = dot( gg, w-vec3(0.0,1.0,1.0) );
+    float vh = dot( gh, w-vec3(1.0,1.0,1.0) );
+	
+    // interpolations
+    return vec4( va + u.x*(vb-va) + u.y*(vc-va) + u.z*(ve-va) + u.x*u.y*(va-vb-vc+vd) + u.y*u.z*(va-vc-ve+vg) + u.z*u.x*(va-vb-ve+vf) + (-va+vb+vc-vd+ve-vf-vg+vh)*u.x*u.y*u.z,    // value
+                 ga + u.x*(gb-ga) + u.y*(gc-ga) + u.z*(ge-ga) + u.x*u.y*(ga-gb-gc+gd) + u.y*u.z*(ga-gc-ge+gg) + u.z*u.x*(ga-gb-ge+gf) + (-ga+gb+gc-gd+ge-gf-gg+gh)*u.x*u.y*u.z +   // derivatives
+                 du * (vec3(vb,vc,ve) - va + u.yzx*vec3(va-vb-vc+vd,va-vc-ve+vg,va-vb-ve+vf) + u.zxy*vec3(va-vb-ve+vf,va-vb-vc+vd,va-vc-ve+vg) + u.yzx*u.zxy*(-va+vb+vc-vd+ve-vf-vg+vh) ));
+}
+
+vec3 voronoi( in vec3 x )
+{
+    vec3 p = floor( x );
+    vec3 f = fract( x );
+
+	float id = 0.0;
+    vec2 res = vec2( 100.0 );
+    for( int k=-1; k<=1; k++ )
+    for( int j=-1; j<=1; j++ )
+    for( int i=-1; i<=1; i++ )
+    {
+        vec3 b = vec3( float(i), float(j), float(k) );
+        vec3 r = vec3( b ) - f + hash( p + b )*0.5+0.5;
+        float d = dot( r, r );
+
+        if( d < res.x )
+        {
+			id = dot( p+b, vec3(1.0,57.0,113.0 ) );
+            res = vec2( d, res.x );
+        }
+        else if( d < res.y )
+        {
+            res.y = d;
+        }
+    }
+
+    return vec3( sqrt( res ), abs(id) );
+}
+
+float field(vec3 p) {
+	p = p*0.05+vec3(1.0, 1.3, 0.1);
+	p += 0.2 * vec3(sin((seed*10000.0) / 16.0), sin((seed*10000.0) / 12.0),  sin((seed*10000.0) / 128.0));
+	float strength = 10.0;
+	float accum = 0.0;
+	float prev = 0.0;
+	float tw = 0.0;
+	for (int i = 0; i < 32; ++i) {
+		float mag = dot(p, p);
+		p = abs(p) / mag + vec3(-0.5, -0.4, -1.5);
+		float w = exp(-float(i) / 7.0);
+		accum += w * exp(-strength * pow(abs(mag - prev), 2.3));
+		tw += w;
+		prev = mag;
+	}
+	return (max(0.0, 5.0 * accum / tw - 0.7)-0.3)*3.0;
+}
+
+
+//helper function for mountain noise, gives a rounded top to mountains
+float smoothabs(float x) {
+	return sqrt(x * x + 0.0001) - 0.01;
+}
+
+//mountain noise for sharp ridges and peaks
+vec4 mountain(vec3 p) {
+	mat3 m = mat3( vec3(1.6,  1.2, 0.8), vec3(-1.2, 0.8, 1.6), vec3(0.8, 1.6, 1.2));
+	float total = 0.0, a = 0.45;
+	vec3 d = vec3(0.0);
+	vec3 p2 = p + vec3(1000.0, 512.12, 719.11);
+	vec3 d2 = vec3(0.0);
+	for (int i = 0; i < 6; i++) {
+		vec4 n  = noised(p + 2.5 * d);
+		vec4 n2 = noised(p2 + 2.5 * d2);
+		d += n.yzw * a * -n.x;
+		d2 += n2.yzw * a * -n2.x;
+		total += ((1.0 - smoothabs(n.x)) * (1.0 - smoothabs(n2.x)) * a) / (1.0 + dot(d, d)) / (1.0 + dot(d2, d2));
+		p = m * p;
+		p2 = m * p2;
+		a *= 0.6 * pow(total, 0.5);
+	}
+	return vec4(total, d*d2);
+}
+
+float fbm(vec3 p) {
+	float total = 0.0, a = 0.5;
+	vec3 d = vec3(0.0);
+	for (int i = 0; i < 8; i++) {
+		vec4 n  = noised(p + 2.5 * d);
+
+		d += n.yzw * a * -n.x;
+
+		total += (n.x * a) / (1.0 + dot(d, d));
+		p = 2.0 * p;
+		a *= 0.5;
+	}
+	return total*0.5+0.5;
+}
+
+
+void fragment() {
+	float theta = UV.y*3.14159;
+	float phi = UV.x*3.14159*2.0;
+	vec3 unit = vec3(0,0,0);
+
+	unit.x = sin(phi) * sin(theta) * -1.0;
+	unit.y = cos(theta) * -1.0;
+	unit.z = cos(phi) * sin(theta) * -1.0;
+	unit = normalize(unit);
+	vec4 m = mountain(unit*5.0)*0.5;
+	float h = m.x;
+	h = (field(unit)*0.6 + m.x*0.5);
+	float f = fbm(unit*3.0);
+	h += 0.3*smoothstep(0.4, 1.0, f);
+	COLOR.xyz = mix((0.7/wavelength)*0.3, ground.xyz*f, h*1.2);
+	COLOR.a = h;
+}"
+
+[sub_resource type="ShaderMaterial" id=2]
+shader = SubResource( 1 )
+shader_param/resolution = Vector2( 1024, 512 )
+shader_param/seed = null
+shader_param/wavelength = null
+shader_param/ground = null
+
+[sub_resource type="Shader" id=3]
+code = "shader_type spatial;
+//render_mode unshaded;
+
+uniform sampler2D texture_albedo;
+
+uniform vec3 v3CameraPos;		// The camera's current position
+uniform vec3 v3LightPos;		// The direction vector to the light source
+uniform float fCameraHeight;	// The camera's current height
+uniform float fCameraHeight2;	// fCameraHeight^2
+
+uniform float fOuterRadius = 51.25;		// The outer (atmosphere) radius
+uniform float fOuterRadius2 = 2626.5625;	// fOuterRadius^2
+uniform float fInnerRadius = 50.0;		// The inner (planetary) radius
+uniform float fInnerRadius2 = 2500.0;	// fInnerRadius^2
+uniform float fScale = 0.8;			// 1 / (fOuterRadius - fInnerRadius)
+uniform float fScaleOverScaleDepth = 3.2;	// fScale / fScaleDepth
+
+uniform vec3 v3InvWavelength = vec3(5.602044746332411, 9.473284437923035, 19.64380261047720);	
+uniform float fKrESun = 0.05;			// Kr * ESun
+uniform float fKmESun = 0.02;			// Km * ESun
+uniform float fKr4PI = 0.031415965359;			// Kr * 4 * PI
+uniform float fKm4PI = 0.01256637061436;			// Km * 4 * PI
+uniform float fScaleDepth = 0.25;		// The scale depth (i.e. the altitude at which the atmosphere's average density is found)
+	
+uniform int nSamples = 2;
+uniform float fSamples = 2.0;
+
+
+varying vec4 color;
+varying vec4 secondaryColor;
+varying vec3 fragpos;
+
+float scale(float fCos) {
+	//scale should be reimplemented as a LUT
+	float x = 1.0 - fCos;
+	//0.25 is scaleDepth
+	return 0.25 * exp(-0.00287 + x*(0.459 + x*(3.83 + x*(-6.80 + x*5.25))));
+}
+
+void vertex() {
+  // Get the ray from the camera to the vertex and its length (which is the far point of the ray passing through the atmosphere)
+	vec3 v3Pos = normalize(VERTEX.xyz)*fInnerRadius;
+	fragpos = v3Pos;
+	vec3 v3Ray = v3Pos - v3CameraPos;
+	float fFar = length(v3Ray);
+	v3Ray /= fFar;
+
+	// Calculate the closest intersection of the ray with the outer atmosphere (which is the near point of the ray passing through the atmosphere)
+	float B = 2.0 * dot(v3CameraPos, v3Ray);
+	float C = fCameraHeight2 - fOuterRadius2;
+	float fDet = max(0.0, B*B - 4.0 * C);
+	float fNear = 0.5 * (-B - sqrt(fDet));
+
+	// Calculate the ray's starting position, then calculate its scattering offset
+	vec3 v3Start = v3CameraPos + v3Ray * fNear;
+	fFar -= fNear;
+	float fdDepth = exp((fInnerRadius - fOuterRadius) / fScaleDepth);
+	float fCameraAngle = dot(-v3Ray, v3Pos) / length(v3Pos);
+	float fLightAngle = dot(v3LightPos, v3Pos) / length(v3Pos);
+	float fCameraScale = scale(fCameraAngle);
+	float fLightScale = scale(fLightAngle);
+	float fCameraOffset = fdDepth*fCameraScale;
+	float fTemp = (fLightScale + fCameraScale);
+
+	// Initialize the scattering loop variables
+	float fSampleLength = fFar / fSamples;
+	float fScaledLength = fSampleLength * fScale;
+	vec3 v3SampleRay = v3Ray * fSampleLength;
+	vec3 v3SamplePoint = v3Start + v3SampleRay * 0.5;
+
+	// Now loop through the sample rays
+	vec3 v3FrontColor = vec3(0.0, 0.0, 0.0);
+	vec3 v3Attenuate;
+	for(int i=0; i<nSamples; i++)
+	{
+		float fHeight = length(v3SamplePoint);
+		float fDepth = exp(fScaleOverScaleDepth * (fInnerRadius - fHeight));
+		float fScatter = fDepth*fTemp - fCameraOffset;
+		v3Attenuate = exp(-fScatter * (v3InvWavelength * fKr4PI + fKm4PI));
+		v3FrontColor += v3Attenuate * (fDepth * fScaledLength);
+		v3SamplePoint += v3SampleRay;
+	}
+	color.rgb = v3FrontColor * (v3InvWavelength * fKrESun + fKmESun);
+
+	// Calculate the attenuation factor for the ground
+	secondaryColor.rgb = v3Attenuate;
+	NORMAL = normalize(VERTEX);
+}
+
+
+void fragment() {
+	vec2 base_uv = UV;
+	vec4 albedo_tex = texture(texture_albedo,base_uv);
+	ALBEDO = color.xyz + albedo_tex.xyz*secondaryColor.xyz;
+	SPECULAR = (1.0-albedo_tex.a)*0.2;
+}
+
+void light() {
+	vec3 view_dir = normalize(VIEW-fragpos);
+	vec3 reflect_dir = reflect(LIGHT, NORMAL);
+	float spec = pow(max(dot(view_dir, reflect_dir), 0.0), 1024);
+	DIFFUSE_LIGHT = ALBEDO;
+	SPECULAR_LIGHT = LIGHT_COLOR*spec;
+}
+"
+
+[sub_resource type="ShaderMaterial" id=4]
+resource_local_to_scene = true
+shader = SubResource( 3 )
+shader_param/v3CameraPos = Vector3( 0, 0, 100 )
+shader_param/v3LightPos = Vector3( 100, 20, 130 )
+shader_param/fCameraHeight = 25.0
+shader_param/fCameraHeight2 = 10000.0
+shader_param/fOuterRadius = 51.25
+shader_param/fOuterRadius2 = 2626.56
+shader_param/fInnerRadius = 50.0
+shader_param/fInnerRadius2 = 2500.0
+shader_param/fScale = 0.8
+shader_param/fScaleOverScaleDepth = 3.2
+shader_param/v3InvWavelength = Vector3( 5.60204, 9.47328, 19.6438 )
+shader_param/fKrESun = 0.05
+shader_param/fKmESun = 0.02
+shader_param/fKr4PI = 0.031416
+shader_param/fKm4PI = 0.0125664
+shader_param/fScaleDepth = 0.25
+shader_param/nSamples = 2
+shader_param/fSamples = 2.0
+
+[sub_resource type="SphereMesh" id=5]
+resource_local_to_scene = true
+material = SubResource( 4 )
+radius = 50.0
+height = 100.0
+radial_segments = 100
+rings = 100
+
+[sub_resource type="Shader" id=6]
+code = "shader_type spatial;
+render_mode cull_front;
+
+uniform sampler2D texture_albedo;
+uniform vec3 v3CameraPos = vec3(0.0, 0.0, 0.0);		// The camera's current position
+uniform vec3 v3LightPos = vec3(100.0, 20.0, 30.0);		// The direction vector to the light source
+uniform float fCameraHeight2 = 10000.0;
+
+uniform float fOuterRadius = 51.25;		// The outer (atmosphere) radius
+uniform float fOuterRadius2 = 2626.5625;	// fOuterRadius^2
+uniform float fInnerRadius = 50.0;		// The inner (planetary) radius
+uniform float fInnerRadius2 = 2500.0;	// fInnerRadius^2
+uniform float fScale = 0.8;			// 1 / (fOuterRadius - fInnerRadius)
+uniform float fScaleOverScaleDepth = 3.2;	// fScale / fScaleDepth
+
+uniform vec3 v3InvWavelength = vec3(5.602044746332411, 9.473284437923035, 19.64380261047720);	
+uniform float fKrESun = 0.05;			// Kr * ESun
+uniform float fKmESun = 0.02;			// Km * ESun
+uniform float fKr4PI = 0.031415965359;			// Kr * 4 * PI
+uniform float fKm4PI = 0.01256637061436;			// Km * 4 * PI
+uniform float fScaleDepth = 0.25;		// The scale depth (i.e. the altitude at which the atmosphere's average density is found)
+	
+uniform int nSamples = 2;
+uniform float fSamples = 2.0;
+
+uniform float g = -0.99;
+uniform float g2 = 0.9801;
+
+varying vec3 v3Direction;
+varying vec4 color;
+varying vec4 secondaryColor;
+varying vec3 vert;
+
+float scale(float fCos)
+{
+	float x = 1.0 - fCos;
+	//first term is fscale depth
+	return fScaleDepth * exp(-0.00287 + x*(0.459 + x*(3.83 + x*(-6.80 + x*5.25))));
+}
+
+void vertex() {
+  // Get the ray from the camera to the vertex and its length (which is the far point of the ray passing through the atmosphere)
+	vec3 v3Pos = normalize(VERTEX.xyz)*fOuterRadius;
+	vec3 v3Ray = v3Pos - v3CameraPos;
+	float fFar = length(v3Ray);
+	v3Ray /= fFar;
+
+// Calculate the closest intersection of the ray with the outer atmosphere (which is the near point of the ray passing through the atmosphere)
+	float B = 2.0 * dot(v3CameraPos, v3Ray);
+	float C = fCameraHeight2 - fOuterRadius2;
+	float fDet = max(0.0, B*B - 4.0 * C);
+	float fNear = 0.5 * (-B - sqrt(fDet));
+
+// Calculate the ray's starting position, then calculate its scattering offset
+	vec3 v3Start = v3CameraPos + v3Ray * fNear;
+	fFar -= fNear;
+	float fStartAngle = dot(v3Ray, v3Start) / fOuterRadius;
+	float fStartDepth = exp(-1.0 / fScaleDepth);
+	float fStartOffset = fStartDepth*scale(fStartAngle);
+
+  // Initialize the scattering loop variables
+	float fSampleLength = fFar / fSamples;
+	float fScaledLength = fSampleLength * fScale;
+	vec3 v3SampleRay = v3Ray * fSampleLength;
+	vec3 v3SamplePoint = v3Start + v3SampleRay * 0.5;
+
+	// Now loop through the sample rays
+	vec3 v3FrontColor = vec3(0.0, 0.0, 0.0);
+	for(int i=0; i<nSamples; i++)
+	{
+		float fHeight = length(v3SamplePoint);
+		float fDepth = exp(fScaleOverScaleDepth * (fInnerRadius - fHeight));
+		float fLightAngle = dot(v3LightPos, v3SamplePoint) / fHeight;
+		float fCameraAngle = dot(v3Ray, v3SamplePoint) / fHeight;
+		float fScatter = (fStartOffset + fDepth*(scale(fLightAngle) - scale(fCameraAngle)));
+		vec3 v3Attenuate = exp(-fScatter * (v3InvWavelength * fKr4PI + fKm4PI));
+		v3FrontColor += v3Attenuate * (fDepth * fScaledLength);
+		v3SamplePoint += v3SampleRay;
+	}
+
+	// Finally, scale the Mie and Rayleigh colors and set up the varying variables for the pixel shader
+	secondaryColor.rgb = v3FrontColor * fKmESun;
+	color.rgb = v3FrontColor * (v3InvWavelength * fKrESun);
+	v3Direction = v3CameraPos - v3Pos;
+}
+
+void fragment() {
+	float fCos = dot(v3LightPos, v3Direction) / length(v3Direction);
+	float fMiePhase = 1.5 * ((1.0 - g2) / (2.0 + g2)) * (1.0 + fCos*fCos) / pow(1.0 + g2 - 2.0*g*fCos, 1.5);
+	ALBEDO = clamp((color + fMiePhase * secondaryColor).xyz, 0.0, 1.0);
+	ALPHA = ALBEDO.b;
+}
+
+void light() {
+	
+	DIFFUSE_LIGHT = ALBEDO;
+}
+"
+
+[sub_resource type="ShaderMaterial" id=7]
+resource_local_to_scene = true
+shader = SubResource( 6 )
+shader_param/v3CameraPos = Vector3( 0, 0, 100 )
+shader_param/v3LightPos = Vector3( 100, 20, 130 )
+shader_param/fCameraHeight2 = 10000.0
+shader_param/fOuterRadius = 51.25
+shader_param/fOuterRadius2 = 2626.56
+shader_param/fInnerRadius = 50.0
+shader_param/fInnerRadius2 = 2500.0
+shader_param/fScale = 0.8
+shader_param/fScaleOverScaleDepth = 3.2
+shader_param/v3InvWavelength = Vector3( 5.60204, 9.47328, 19.6438 )
+shader_param/fKrESun = 0.05
+shader_param/fKmESun = 0.02
+shader_param/fKr4PI = 0.031416
+shader_param/fKm4PI = 0.0125664
+shader_param/fScaleDepth = 0.25
+shader_param/nSamples = 2
+shader_param/fSamples = 2.0
+shader_param/g = -0.99
+shader_param/g2 = 0.9801
+
+[sub_resource type="SphereMesh" id=8]
+resource_local_to_scene = true
+material = SubResource( 4 )
+radius = 50.0
+height = 100.0
+radial_segments = 100
+rings = 100
+
+[sub_resource type="ProceduralSky" id=9]
+
+[sub_resource type="Environment" id=10]
+background_sky = SubResource( 9 )
+
+[node name="Planet" type="Spatial"]
+script = ExtResource( 1 )
+make_random = false
+
+[node name="Ground" type="Viewport" parent="."]
+size = Vector2( 1024, 512 )
+transparent_bg = true
+hdr = false
+render_target_update_mode = 1
+
+[node name="ColorRect" type="ColorRect" parent="Ground"]
+material = SubResource( 2 )
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="Surface" type="MeshInstance" parent="."]
+material_override = SubResource( 4 )
+mesh = SubResource( 5 )
+material/0 = null
+
+[node name="Atmosphere" type="MeshInstance" parent="."]
+material_override = SubResource( 7 )
+cast_shadow = 0
+mesh = SubResource( 8 )
+material/0 = null
+
+[node name="Camera" type="Camera" parent="."]
+transform = Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 125.365 )
+
+[node name="Star" type="OmniLight" parent="."]
+transform = Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, 245.618, 0, 0 )
+omni_range = 500.0
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource( 10 )
+
